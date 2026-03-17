@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::ConfigError;
 use crate::validate;
@@ -43,7 +43,8 @@ pub struct ThemeConfig {
 }
 
 /// Validated `#RRGGBB` hex color.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(transparent)]
 pub struct HexColor(String);
 
 impl HexColor {
@@ -179,5 +180,34 @@ mod tests {
         }"#;
         let result: Result<WorkspaceSet, _> = serde_json::from_str(json);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn serde_test_hex_color_deserialize() {
+        use serde_test::{assert_de_tokens, Token};
+        let color = HexColor::new("#A3BE8C").unwrap();
+        assert_de_tokens(&color, &[Token::Str("#A3BE8C")]);
+    }
+
+    #[test]
+    fn serde_path_error_shows_field_path() {
+        let json = r#"{
+            "baseConfigPath": "/config",
+            "ghosttyBin": "/bin/ghostty",
+            "bundleIdPrefix": "io.test",
+            "workspaces": [{
+                "name": "ws",
+                "displayName": "WS",
+                "theme": { "cursorColor": "NOT_HEX" }
+            }]
+        }"#;
+        let jd = &mut serde_json::Deserializer::from_str(json);
+        let err = serde_path_to_error::deserialize::<_, WorkspaceSet>(jd)
+            .unwrap_err();
+        let path = err.path().to_string();
+        assert!(
+            path.contains("cursorColor") || path.contains("cursor_color"),
+            "error path should mention the field: {path}"
+        );
     }
 }

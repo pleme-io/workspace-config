@@ -6,7 +6,33 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use workspace_config::config::WorkspaceSet;
-use workspace_config::{ghostty, plist, wrapper};
+use workspace_config::{ghostty, plist, runtime, wrapper};
+
+fn main() -> Result<()> {
+    // Multicall: if invoked as anything other than "workspace-config", run as wrapper
+    let argv0 = std::env::args().next().unwrap_or_default();
+    let binary_name = std::path::Path::new(&argv0)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("workspace-config");
+
+    if binary_name != "workspace-config" {
+        return runtime::exec_wrapper(binary_name);
+    }
+
+    let cli = Cli::parse();
+
+    match cli.command {
+        Command::GenerateAll {
+            input,
+            config_dir,
+            wrapper_dir,
+            app_dir,
+        } => generate_all(&input, &config_dir, &wrapper_dir, &app_dir),
+        Command::Validate { input } => validate(&input),
+        Command::Exec { name } => runtime::exec_wrapper(&name),
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "workspace-config", about = "Typed config generator for Ghostty workspace isolation")]
@@ -17,7 +43,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Generate all workspace artifacts (configs, wrappers, app bundles).
+    /// Generate all workspace artifacts (configs, runtime config, app bundles).
     GenerateAll {
         /// Path to JSON input file.
         #[arg(long)]
@@ -25,7 +51,7 @@ enum Command {
         /// Output directory for Ghostty config files.
         #[arg(long)]
         config_dir: PathBuf,
-        /// Output directory for wrapper scripts.
+        /// Output directory for runtime wrapper config.
         #[arg(long)]
         wrapper_dir: PathBuf,
         /// Output directory for macOS .app bundles.
@@ -38,76 +64,83 @@ enum Command {
         #[arg(long)]
         input: PathBuf,
     },
+    /// Execute a wrapper by name (reads ~/.config/workspace-config/wrappers.d/).
+    Exec {
+        /// Wrapper binary name (e.g. ghostty-pleme).
+        name: String,
+    },
 }
 
-fn main() -> Result<()> {
-    let cli = Cli::parse();
+fn generate_all(
+    input: &PathBuf,
+    config_dir: &PathBuf,
+    wrapper_dir: &PathBuf,
+    app_dir: &PathBuf,
+) -> Result<()> {
+    let json =
+        fs::read_to_string(input).with_context(|| format!("failed to read {}", input.display()))?;
+    let jd = &mut serde_json::Deserializer::from_str(&json);
+    let ws_set: WorkspaceSet = serde_path_to_error::deserialize(jd)
+        .context("failed to parse workspace JSON")?;
+    ws_set.validate().context("workspace validation failed")?;
 
-    match cli.command {
-        Command::GenerateAll {
-            input,
-            config_dir,
-            wrapper_dir,
-            app_dir,
-        } => {
-            let json = fs::read_to_string(&input)
-                .with_context(|| format!("failed to read {}", input.display()))?;
-            let ws_set: WorkspaceSet =
-                serde_json::from_str(&json).context("failed to parse workspace JSON")?;
-            ws_set.validate().context("workspace validation failed")?;
+    fs::create_dir_all(config_dir)?;
+    fs::create_dir_all(wrapper_dir)?;
+    fs::create_dir_all(app_dir)?;
 
-            fs::create_dir_all(&config_dir)?;
-            fs::create_dir_all(&wrapper_dir)?;
-            fs::create_dir_all(&app_dir)?;
+    let mut wrapper_entries = Vec::new();
 
-            for ws in &ws_set.workspaces {
-                // Config file
-                let config_content =
-                    ghostty::generate_config(&ws_set.base_config_path, ws);
-                let config_path = config_dir.join(format!("config-{}", ws.name));
-                fs::write(&config_path, &config_content)?;
+    for ws in &ws_set.workspaces {
+        // Ghostty config file
+        let config_content = ghostty::generate_config(&ws_set.base_config_path, ws);
+        fs::write(config_dir.join(format!("config-{}", ws.name)), &config_content)?;
 
-                // Wrapper script
-                let wrapper_content =
-                    wrapper::generate_wrapper(&ws_set.ghostty_bin, ws);
-                let wrapper_path = wrapper_dir.join(format!("ghostty-{}", ws.name));
-                fs::write(&wrapper_path, &wrapper_content)?;
-                fs::set_permissions(&wrapper_path, fs::Permissions::from_mode(0o755))?;
+        // Wrapper entry for runtime config
+        wrapper_entries.push(wrapper::ghostty_wrapper_entry(&ws_set.ghostty_bin, ws));
 
-                // macOS .app bundle
-                let app_name = format!("Ghostty {}.app", ws.display_name);
-                let app_base = app_dir.join(&app_name);
-                let macos_dir = app_base.join("Contents/MacOS");
-                fs::create_dir_all(&macos_dir)?;
+        // macOS .app bundle
+        let app_name = format!("Ghostty {}.app", ws.display_name);
+        let app_base = app_dir.join(&app_name);
+        let macos_dir = app_base.join("Contents/MacOS");
+        fs::create_dir_all(&macos_dir)?;
 
-                // App wrapper (same as PATH wrapper)
-                let app_wrapper_path = macos_dir.join(format!("ghostty-{}", ws.name));
-                fs::write(&app_wrapper_path, &wrapper_content)?;
-                fs::set_permissions(
-                    &app_wrapper_path,
-                    fs::Permissions::from_mode(0o755),
-                )?;
-
-                // Info.plist
-                let plist_bytes =
-                    plist::generate_info_plist(&ws_set.bundle_id_prefix, ws)?;
-                let plist_path = app_base.join("Contents/Info.plist");
-                fs::write(&plist_path, &plist_bytes)?;
-            }
-
-            Ok(())
-        }
-        Command::Validate { input } => {
-            let json = fs::read_to_string(&input)
-                .with_context(|| format!("failed to read {}", input.display()))?;
-            let ws_set: WorkspaceSet =
-                serde_json::from_str(&json).context("failed to parse workspace JSON")?;
-            ws_set.validate().context("workspace validation failed")?;
-            eprintln!(
-                "valid: {} workspace(s)",
-                ws_set.workspaces.len()
-            );
-            Ok(())
-        }
+        // Info.plist
+        let plist_bytes = plist::generate_info_plist(&ws_set.bundle_id_prefix, ws)?;
+        fs::write(app_base.join("Contents/Info.plist"), &plist_bytes)?;
     }
+
+    // Write runtime wrapper config (consumed by multicall exec)
+    let wrappers_json = serde_json::to_string_pretty(&wrapper_entries)?;
+    fs::write(wrapper_dir.join("wrappers.json"), &wrappers_json)?;
+
+    // Write binary names list (consumed by Nix to create symlinks)
+    let names: Vec<&str> = wrapper_entries.iter().map(|e| e.binary_name.as_str()).collect();
+    fs::write(wrapper_dir.join("binary-names"), names.join("\n") + "\n")?;
+
+    // .app bundle executables need to be symlinks to workspace-config at Nix level
+    // (can't create cross-derivation symlinks here — Nix module handles this)
+    // Write a marker so Nix knows which binaries go in which .app
+    for ws in &ws_set.workspaces {
+        let app_name = format!("Ghostty {}.app", ws.display_name);
+        let marker_path = app_dir
+            .join(&app_name)
+            .join("Contents/MacOS")
+            .join(format!(".wrapper-name-{}", ws.name));
+        fs::write(&marker_path, format!("ghostty-{}", ws.name))?;
+        // Set the executable permission on the marker so the .app structure is valid
+        fs::set_permissions(&marker_path, fs::Permissions::from_mode(0o755))?;
+    }
+
+    Ok(())
+}
+
+fn validate(input: &PathBuf) -> Result<()> {
+    let json =
+        fs::read_to_string(input).with_context(|| format!("failed to read {}", input.display()))?;
+    let jd = &mut serde_json::Deserializer::from_str(&json);
+    let ws_set: WorkspaceSet = serde_path_to_error::deserialize(jd)
+        .context("failed to parse workspace JSON")?;
+    ws_set.validate().context("workspace validation failed")?;
+    eprintln!("valid: {} workspace(s)", ws_set.workspaces.len());
+    Ok(())
 }

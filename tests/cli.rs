@@ -122,18 +122,23 @@ fn generate_all_creates_expected_files() {
     assert!(pleme_config.contains("selection-background = #4C566A"));
     assert!(pleme_config.contains("background = #2E3842"));
 
-    // Wrapper scripts
-    assert!(wrapper_dir.join("ghostty-pleme").exists());
-    assert!(wrapper_dir.join("ghostty-akeyless").exists());
+    // Runtime wrapper config (JSON, not bash)
+    assert!(wrapper_dir.join("wrappers.json").exists());
+    let wrappers_json =
+        fs::read_to_string(wrapper_dir.join("wrappers.json")).unwrap();
+    assert!(wrappers_json.contains("ghostty-pleme"));
+    assert!(wrappers_json.contains("ghostty-akeyless"));
+    assert!(wrappers_json.contains("/nix/store/abc123/bin/ghostty"));
+    assert!(wrappers_json.contains("$HOME/.config/ghostty/config-pleme"));
 
-    let pleme_wrapper = fs::read_to_string(wrapper_dir.join("ghostty-pleme")).unwrap();
-    assert!(pleme_wrapper.contains("#!/bin/bash"));
-    assert!(pleme_wrapper.contains("export WORKSPACE=\"pleme\""));
-    assert!(pleme_wrapper.contains("/nix/store/abc123/bin/ghostty"));
+    // Binary names list
+    assert!(wrapper_dir.join("binary-names").exists());
+    let names = fs::read_to_string(wrapper_dir.join("binary-names")).unwrap();
+    assert!(names.contains("ghostty-pleme"));
+    assert!(names.contains("ghostty-akeyless"));
 
     // App bundles
     let pleme_app = app_dir.join("Ghostty pleme.app");
-    assert!(pleme_app.join("Contents/MacOS/ghostty-pleme").exists());
     assert!(pleme_app.join("Contents/Info.plist").exists());
 
     let plist_content =
@@ -142,40 +147,15 @@ fn generate_all_creates_expected_files() {
     assert!(plist_content.contains("io.pleme.ghostty-pleme"));
 
     let akeyless_app = app_dir.join("Ghostty akeyless.app");
-    assert!(akeyless_app.join("Contents/MacOS/ghostty-akeyless").exists());
     assert!(akeyless_app.join("Contents/Info.plist").exists());
 }
 
 #[test]
-fn generate_all_wrapper_is_executable() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let dir = TempDir::new().unwrap();
-    let input = dir.path().join("input.json");
-    fs::write(&input, sample_json()).unwrap();
-
-    let config_dir = dir.path().join("configs");
-    let wrapper_dir = dir.path().join("wrappers");
-    let app_dir = dir.path().join("apps");
-
+fn exec_subcommand_fails_gracefully_for_unknown_wrapper() {
     Command::cargo_bin("workspace-config")
         .unwrap()
-        .args([
-            "generate-all",
-            "--input",
-            input.to_str().unwrap(),
-            "--config-dir",
-            config_dir.to_str().unwrap(),
-            "--wrapper-dir",
-            wrapper_dir.to_str().unwrap(),
-            "--app-dir",
-            app_dir.to_str().unwrap(),
-        ])
+        .args(["exec", "nonexistent-wrapper"])
         .assert()
-        .success();
-
-    let perms = fs::metadata(wrapper_dir.join("ghostty-pleme"))
-        .unwrap()
-        .permissions();
-    assert_eq!(perms.mode() & 0o111, 0o111, "wrapper should be executable");
+        .failure()
+        .stderr(predicate::str::contains("unknown wrapper"));
 }
