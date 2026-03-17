@@ -109,9 +109,9 @@ fn generate_all(
         fs::write(app_base.join("Contents/Info.plist"), &plist_bytes)?;
     }
 
-    // Write runtime wrapper config (consumed by multicall exec)
-    let wrappers_json = serde_json::to_string_pretty(&wrapper_entries)?;
-    fs::write(wrapper_dir.join("wrappers.json"), &wrappers_json)?;
+    // Write runtime wrapper config as YAML (shikumi convention)
+    let wrappers_yaml = serde_yaml::to_string(&wrapper_entries)?;
+    fs::write(wrapper_dir.join("wrappers.yaml"), &wrappers_yaml)?;
 
     // Write binary names list (consumed by Nix to create symlinks)
     let names: Vec<&str> = wrapper_entries.iter().map(|e| e.binary_name.as_str()).collect();

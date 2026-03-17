@@ -122,14 +122,14 @@ fn generate_all_creates_expected_files() {
     assert!(pleme_config.contains("selection-background = #4C566A"));
     assert!(pleme_config.contains("background = #2E3842"));
 
-    // Runtime wrapper config (JSON, not bash)
-    assert!(wrapper_dir.join("wrappers.json").exists());
-    let wrappers_json =
-        fs::read_to_string(wrapper_dir.join("wrappers.json")).unwrap();
-    assert!(wrappers_json.contains("ghostty-pleme"));
-    assert!(wrappers_json.contains("ghostty-akeyless"));
-    assert!(wrappers_json.contains("/nix/store/abc123/bin/ghostty"));
-    assert!(wrappers_json.contains("$HOME/.config/ghostty/config-pleme"));
+    // Runtime wrapper config (YAML, shikumi convention)
+    assert!(wrapper_dir.join("wrappers.yaml").exists());
+    let wrappers_yaml =
+        fs::read_to_string(wrapper_dir.join("wrappers.yaml")).unwrap();
+    assert!(wrappers_yaml.contains("ghostty-pleme"));
+    assert!(wrappers_yaml.contains("ghostty-akeyless"));
+    assert!(wrappers_yaml.contains("/nix/store/abc123/bin/ghostty"));
+    assert!(wrappers_yaml.contains("$HOME/.config/ghostty/config-pleme"));
 
     // Binary names list
     assert!(wrapper_dir.join("binary-names").exists());

@@ -64,11 +64,13 @@ pub fn config_dir() -> PathBuf {
         .join("workspace-config/wrappers.d")
 }
 
-/// Load all wrapper entries from JSON files in a directory.
+/// Load all wrapper entries from YAML/JSON files in a directory.
+///
+/// Supports `.yaml`, `.yml`, and `.json` extensions (shikumi convention: YAML preferred).
 ///
 /// # Errors
 ///
-/// Returns an error if a JSON file can't be read or parsed.
+/// Returns an error if a config file can't be read or parsed.
 pub fn load_wrappers(dir: &Path) -> anyhow::Result<Vec<WrapperEntry>> {
     let mut entries = Vec::new();
     if !dir.is_dir() {
@@ -77,14 +79,21 @@ pub fn load_wrappers(dir: &Path) -> anyhow::Result<Vec<WrapperEntry>> {
     let mut paths: Vec<_> = fs::read_dir(dir)?
         .filter_map(Result::ok)
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        .filter(|p| {
+            p.extension()
+                .is_some_and(|e| e == "yaml" || e == "yml" || e == "json")
+        })
         .collect();
     paths.sort();
     for path in paths {
         let content = fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        let batch: Vec<WrapperEntry> = serde_json::from_str(&content)
-            .with_context(|| format!("failed to parse {}", path.display()))?;
+        let batch: Vec<WrapperEntry> = match path.extension().and_then(|e| e.to_str()) {
+            Some("json") => serde_json::from_str(&content)
+                .with_context(|| format!("failed to parse JSON {}", path.display()))?,
+            _ => serde_yaml::from_str(&content)
+                .with_context(|| format!("failed to parse YAML {}", path.display()))?,
+        };
         entries.extend(batch);
     }
     Ok(entries)
@@ -128,7 +137,6 @@ pub fn exec_wrapper(name: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use tempfile::TempDir;
 
     #[test]
@@ -159,24 +167,62 @@ mod tests {
     }
 
     #[test]
-    fn load_wrappers_from_dir() {
+    fn load_wrappers_from_yaml() {
         let dir = TempDir::new().unwrap();
-        let json = serde_json::to_string(&vec![
-            WrapperEntry {
-                binary_name: "ghostty-pleme".into(),
-                workspace: "pleme".into(),
-                target_bin: "/bin/ghostty".into(),
-                args: vec!["--config-file".into(), "/config".into()],
-            },
-        ])
+        let yaml = serde_yaml::to_string(&vec![WrapperEntry {
+            binary_name: "ghostty-pleme".into(),
+            workspace: "pleme".into(),
+            target_bin: "/bin/ghostty".into(),
+            args: vec!["--config-file".into(), "/config".into()],
+        }])
         .unwrap();
-        let mut f = fs::File::create(dir.path().join("ghostty.json")).unwrap();
-        f.write_all(json.as_bytes()).unwrap();
+        fs::write(dir.path().join("ghostty.yaml"), &yaml).unwrap();
 
         let entries = load_wrappers(dir.path()).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].binary_name, "ghostty-pleme");
         assert_eq!(entries[0].workspace, "pleme");
+    }
+
+    #[test]
+    fn load_wrappers_from_json() {
+        let dir = TempDir::new().unwrap();
+        let json = serde_json::to_string(&vec![WrapperEntry {
+            binary_name: "claude-pleme".into(),
+            workspace: "pleme".into(),
+            target_bin: "claude".into(),
+            args: vec![],
+        }])
+        .unwrap();
+        fs::write(dir.path().join("claude.json"), &json).unwrap();
+
+        let entries = load_wrappers(dir.path()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].binary_name, "claude-pleme");
+    }
+
+    #[test]
+    fn load_wrappers_mixed_formats() {
+        let dir = TempDir::new().unwrap();
+        let yaml = serde_yaml::to_string(&vec![WrapperEntry {
+            binary_name: "ghostty-pleme".into(),
+            workspace: "pleme".into(),
+            target_bin: "/bin/ghostty".into(),
+            args: vec![],
+        }])
+        .unwrap();
+        let json = serde_json::to_string(&vec![WrapperEntry {
+            binary_name: "claude-pleme".into(),
+            workspace: "pleme".into(),
+            target_bin: "claude".into(),
+            args: vec![],
+        }])
+        .unwrap();
+        fs::write(dir.path().join("ghostty.yaml"), &yaml).unwrap();
+        fs::write(dir.path().join("claude.json"), &json).unwrap();
+
+        let entries = load_wrappers(dir.path()).unwrap();
+        assert_eq!(entries.len(), 2);
     }
 
     #[test]
