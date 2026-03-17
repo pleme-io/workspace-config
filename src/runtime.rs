@@ -5,22 +5,139 @@ use std::{env, fs};
 use anyhow::{Context, anyhow};
 use serde::{Deserialize, Serialize};
 
+// ═══════════════════════════════════════════════════════════════════
+// Data types
+// ═══════════════════════════════════════════════════════════════════
+
 /// A single wrapper entry in the runtime config.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WrapperEntry {
-    /// Name of the wrapper binary (e.g. `ghostty-pleme`, `claude-akeyless`).
     pub binary_name: String,
-    /// Workspace name to set in `WORKSPACE` env var.
     pub workspace: String,
-    /// Target binary to exec.
     pub target_bin: String,
-    /// Arguments to prepend before user args. Supports `$HOME` expansion.
     #[serde(default)]
     pub args: Vec<String>,
 }
 
+/// Resolved wrapper ready for exec — all env vars expanded, args assembled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedWrapper {
+    pub workspace: String,
+    pub target: String,
+    pub args: Vec<String>,
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// WrapperResolver trait — testable resolution without exec
+// ═══════════════════════════════════════════════════════════════════
+
+/// Resolve a wrapper name to an executable target + args.
+/// Implement this trait for custom config backends (filesystem, in-memory).
+pub trait WrapperResolver {
+    /// Find a wrapper by name and return the resolved target + args.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the wrapper is unknown or config can't be read.
+    fn resolve(&self, name: &str) -> anyhow::Result<ResolvedWrapper>;
+}
+
+/// Resolves wrappers from YAML/JSON files in a directory.
+pub struct FsResolver {
+    pub config_dir: PathBuf,
+}
+
+impl FsResolver {
+    #[must_use]
+    pub fn from_xdg() -> Self {
+        Self { config_dir: config_dir() }
+    }
+}
+
+impl WrapperResolver for FsResolver {
+    fn resolve(&self, name: &str) -> anyhow::Result<ResolvedWrapper> {
+        let wrappers = load_wrappers(&self.config_dir)
+            .with_context(|| format!("loading wrappers from {}", self.config_dir.display()))?;
+
+        let entry = wrappers
+            .iter()
+            .find(|w| w.binary_name == name)
+            .ok_or_else(|| {
+                anyhow!("unknown wrapper '{name}' — no entry in {}", self.config_dir.display())
+            })?;
+
+        Ok(ResolvedWrapper {
+            workspace: entry.workspace.clone(),
+            target: expand_env(&entry.target_bin),
+            args: entry.args.iter().map(|a| expand_env(a)).collect(),
+        })
+    }
+}
+
+/// In-memory resolver for testing. No filesystem, no env var reads.
+pub struct MockResolver {
+    pub entries: Vec<WrapperEntry>,
+}
+
+impl WrapperResolver for MockResolver {
+    fn resolve(&self, name: &str) -> anyhow::Result<ResolvedWrapper> {
+        let entry = self.entries
+            .iter()
+            .find(|w| w.binary_name == name)
+            .ok_or_else(|| anyhow!("unknown wrapper '{name}'"))?;
+
+        Ok(ResolvedWrapper {
+            workspace: entry.workspace.clone(),
+            target: expand_env(&entry.target_bin),
+            args: entry.args.iter().map(|a| expand_env(a)).collect(),
+        })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Exec — thin untestable layer (just sets env + calls exec)
+// ═══════════════════════════════════════════════════════════════════
+
+/// Resolve a wrapper by name and exec it. Replaces the current process.
+///
+/// # Errors
+///
+/// Returns an error if resolution fails or exec fails.
+pub fn exec_wrapper(name: &str) -> anyhow::Result<()> {
+    exec_with_resolver(&FsResolver::from_xdg(), name)
+}
+
+/// Resolve and exec using a specific resolver. Testable up to the exec call.
+///
+/// # Errors
+///
+/// Returns an error if resolution fails or exec fails.
+pub fn exec_with_resolver(resolver: &dyn WrapperResolver, name: &str) -> anyhow::Result<()> {
+    let resolved = resolver.resolve(name)?;
+
+    // SAFETY: runs before exec(), which replaces the process. No other threads.
+    unsafe { env::set_var("WORKSPACE", &resolved.workspace) };
+
+    let extra_args: Vec<String> = env::args().skip(1).collect();
+
+    let err = std::process::Command::new(&resolved.target)
+        .args(&resolved.args)
+        .args(&extra_args)
+        .exec();
+
+    Err(anyhow!("failed to exec {}: {err}", resolved.target))
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Helpers
+// ═══════════════════════════════════════════════════════════════════
+
 /// Expand `$VARNAME` references in a string using the current environment.
+///
+/// Supports `$VAR` syntax (alphanumeric + underscore). Missing vars are
+/// left as-is (`$UNKNOWN` stays `$UNKNOWN`). Bare `$` at end of string
+/// is preserved.
 #[must_use]
 pub fn expand_env(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
@@ -53,7 +170,7 @@ pub fn expand_env(s: &str) -> String {
     result
 }
 
-/// Find the wrappers.d config directory.
+/// Find the wrappers.d config directory via XDG.
 #[must_use]
 pub fn config_dir() -> PathBuf {
     env::var("XDG_CONFIG_HOME")
@@ -66,7 +183,7 @@ pub fn config_dir() -> PathBuf {
 
 /// Load all wrapper entries from YAML/JSON files in a directory.
 ///
-/// Supports `.yaml`, `.yml`, and `.json` extensions (shikumi convention: YAML preferred).
+/// Supports `.yaml`, `.yml`, and `.json` extensions.
 ///
 /// # Errors
 ///
@@ -99,45 +216,16 @@ pub fn load_wrappers(dir: &Path) -> anyhow::Result<Vec<WrapperEntry>> {
     Ok(entries)
 }
 
-/// Execute a wrapper by name: set WORKSPACE, exec target binary.
-///
-/// # Errors
-///
-/// Returns an error if the wrapper is unknown or exec fails.
-pub fn exec_wrapper(name: &str) -> anyhow::Result<()> {
-    let dir = config_dir();
-    let wrappers =
-        load_wrappers(&dir).with_context(|| format!("loading wrappers from {}", dir.display()))?;
-
-    let entry = wrappers
-        .iter()
-        .find(|w| w.binary_name == name)
-        .ok_or_else(|| anyhow!("unknown wrapper '{name}' — no entry in {}", dir.display()))?;
-
-    // Set workspace env var
-    // SAFETY: This runs before exec(), which replaces the process. No other threads exist.
-    unsafe { env::set_var("WORKSPACE", &entry.workspace) };
-
-    // Expand env vars in args and target
-    let target = expand_env(&entry.target_bin);
-    let expanded_args: Vec<String> = entry.args.iter().map(|a| expand_env(a)).collect();
-
-    // Collect extra args from command line (passthrough)
-    let extra_args: Vec<String> = env::args().skip(1).collect();
-
-    // Exec — replaces current process, never returns on success
-    let err = std::process::Command::new(&target)
-        .args(&expanded_args)
-        .args(&extra_args)
-        .exec();
-
-    Err(anyhow!("failed to exec {target}: {err}"))
-}
+// ═══════════════════════════════════════════════════════════════════
+// Tests
+// ═══════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    // ─── expand_env ──────────────────────────────────────────────
 
     #[test]
     fn expand_env_home() {
@@ -167,6 +255,15 @@ mod tests {
     }
 
     #[test]
+    fn expand_env_multiple_vars() {
+        unsafe { env::set_var("_WC_A", "hello") };
+        unsafe { env::set_var("_WC_B", "world") };
+        assert_eq!(expand_env("$_WC_A/$_WC_B"), "hello/world");
+    }
+
+    // ─── load_wrappers ──────────────────────────────────────────
+
+    #[test]
     fn load_wrappers_from_yaml() {
         let dir = TempDir::new().unwrap();
         let yaml = serde_yaml::to_string(&vec![WrapperEntry {
@@ -181,7 +278,6 @@ mod tests {
         let entries = load_wrappers(dir.path()).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].binary_name, "ghostty-pleme");
-        assert_eq!(entries[0].workspace, "pleme");
     }
 
     #[test]
@@ -205,19 +301,13 @@ mod tests {
     fn load_wrappers_mixed_formats() {
         let dir = TempDir::new().unwrap();
         let yaml = serde_yaml::to_string(&vec![WrapperEntry {
-            binary_name: "ghostty-pleme".into(),
-            workspace: "pleme".into(),
-            target_bin: "/bin/ghostty".into(),
-            args: vec![],
-        }])
-        .unwrap();
+            binary_name: "ghostty-pleme".into(), workspace: "pleme".into(),
+            target_bin: "/bin/ghostty".into(), args: vec![],
+        }]).unwrap();
         let json = serde_json::to_string(&vec![WrapperEntry {
-            binary_name: "claude-pleme".into(),
-            workspace: "pleme".into(),
-            target_bin: "claude".into(),
-            args: vec![],
-        }])
-        .unwrap();
+            binary_name: "claude-pleme".into(), workspace: "pleme".into(),
+            target_bin: "claude".into(), args: vec![],
+        }]).unwrap();
         fs::write(dir.path().join("ghostty.yaml"), &yaml).unwrap();
         fs::write(dir.path().join("claude.json"), &json).unwrap();
 
@@ -228,27 +318,104 @@ mod tests {
     #[test]
     fn load_wrappers_empty_dir() {
         let dir = TempDir::new().unwrap();
-        let entries = load_wrappers(dir.path()).unwrap();
-        assert!(entries.is_empty());
+        assert!(load_wrappers(dir.path()).unwrap().is_empty());
     }
 
     #[test]
     fn load_wrappers_nonexistent_dir() {
-        let entries = load_wrappers(Path::new("/nonexistent")).unwrap();
-        assert!(entries.is_empty());
+        assert!(load_wrappers(Path::new("/nonexistent")).unwrap().is_empty());
     }
 
     #[test]
     fn wrapper_entry_serialize_roundtrip() {
         let entry = WrapperEntry {
-            binary_name: "claude-pleme".into(),
-            workspace: "pleme".into(),
+            binary_name: "claude-pleme".into(), workspace: "pleme".into(),
             target_bin: "claude".into(),
             args: vec!["--settings".into(), "/nix/store/abc/settings.json".into()],
         };
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: WrapperEntry = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.binary_name, "claude-pleme");
-        assert_eq!(parsed.args.len(), 2);
+        assert_eq!(entry, parsed);
+    }
+
+    // ─── WrapperResolver trait ──────────────────────────────────
+
+    #[test]
+    fn mock_resolver_finds_entry() {
+        let resolver = MockResolver {
+            entries: vec![
+                WrapperEntry {
+                    binary_name: "ghostty-pleme".into(),
+                    workspace: "pleme".into(),
+                    target_bin: "/nix/store/abc/bin/ghostty".into(),
+                    args: vec!["--config-file=/config".into()],
+                },
+            ],
+        };
+        let resolved = resolver.resolve("ghostty-pleme").unwrap();
+        assert_eq!(resolved.workspace, "pleme");
+        assert_eq!(resolved.target, "/nix/store/abc/bin/ghostty");
+        assert_eq!(resolved.args, vec!["--config-file=/config"]);
+    }
+
+    #[test]
+    fn mock_resolver_unknown_wrapper() {
+        let resolver = MockResolver { entries: vec![] };
+        assert!(resolver.resolve("nonexistent").is_err());
+    }
+
+    #[test]
+    fn mock_resolver_expands_env_in_args() {
+        unsafe { env::set_var("_WC_TEST_HOME2", "/Users/test") };
+        let resolver = MockResolver {
+            entries: vec![WrapperEntry {
+                binary_name: "ghostty-pleme".into(),
+                workspace: "pleme".into(),
+                target_bin: "/bin/ghostty".into(),
+                args: vec!["--config-file=$_WC_TEST_HOME2/.config/ghostty/config-pleme".into()],
+            }],
+        };
+        let resolved = resolver.resolve("ghostty-pleme").unwrap();
+        assert_eq!(
+            resolved.args,
+            vec!["--config-file=/Users/test/.config/ghostty/config-pleme"]
+        );
+    }
+
+    #[test]
+    fn fs_resolver_from_yaml() {
+        let dir = TempDir::new().unwrap();
+        let yaml = serde_yaml::to_string(&vec![WrapperEntry {
+            binary_name: "ghostty-akeyless".into(),
+            workspace: "akeyless".into(),
+            target_bin: "/bin/ghostty".into(),
+            args: vec!["--flag".into()],
+        }]).unwrap();
+        fs::write(dir.path().join("ghostty.yaml"), &yaml).unwrap();
+
+        let resolver = FsResolver { config_dir: dir.path().to_path_buf() };
+        let resolved = resolver.resolve("ghostty-akeyless").unwrap();
+        assert_eq!(resolved.workspace, "akeyless");
+        assert_eq!(resolved.target, "/bin/ghostty");
+        assert_eq!(resolved.args, vec!["--flag"]);
+    }
+
+    #[test]
+    fn fs_resolver_unknown_wrapper() {
+        let dir = TempDir::new().unwrap();
+        let resolver = FsResolver { config_dir: dir.path().to_path_buf() };
+        let err = resolver.resolve("nonexistent").unwrap_err();
+        assert!(err.to_string().contains("unknown wrapper"));
+    }
+
+    #[test]
+    fn resolved_wrapper_equality() {
+        let a = ResolvedWrapper {
+            workspace: "pleme".into(),
+            target: "/bin/ghostty".into(),
+            args: vec!["--flag".into()],
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
     }
 }
