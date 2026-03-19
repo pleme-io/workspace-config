@@ -110,7 +110,7 @@ fn generate_all(
     }
 
     // Write runtime wrapper config as YAML (shikumi convention)
-    let wrappers_yaml = serde_yaml::to_string(&wrapper_entries)?;
+    let wrappers_yaml = serde_yaml_ng::to_string(&wrapper_entries)?;
     fs::write(wrapper_dir.join("wrappers.yaml"), &wrappers_yaml)?;
 
     // Write binary names list (consumed by Nix to create symlinks)

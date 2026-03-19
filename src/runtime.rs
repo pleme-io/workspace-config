@@ -208,7 +208,7 @@ pub fn load_wrappers(dir: &Path) -> anyhow::Result<Vec<WrapperEntry>> {
         let batch: Vec<WrapperEntry> = match path.extension().and_then(|e| e.to_str()) {
             Some("json") => serde_json::from_str(&content)
                 .with_context(|| format!("failed to parse JSON {}", path.display()))?,
-            _ => serde_yaml::from_str(&content)
+            _ => serde_yaml_ng::from_str(&content)
                 .with_context(|| format!("failed to parse YAML {}", path.display()))?,
         };
         entries.extend(batch);
@@ -266,7 +266,7 @@ mod tests {
     #[test]
     fn load_wrappers_from_yaml() {
         let dir = TempDir::new().unwrap();
-        let yaml = serde_yaml::to_string(&vec![WrapperEntry {
+        let yaml = serde_yaml_ng::to_string(&vec![WrapperEntry {
             binary_name: "ghostty-pleme".into(),
             workspace: "pleme".into(),
             target_bin: "/bin/ghostty".into(),
@@ -300,7 +300,7 @@ mod tests {
     #[test]
     fn load_wrappers_mixed_formats() {
         let dir = TempDir::new().unwrap();
-        let yaml = serde_yaml::to_string(&vec![WrapperEntry {
+        let yaml = serde_yaml_ng::to_string(&vec![WrapperEntry {
             binary_name: "ghostty-pleme".into(), workspace: "pleme".into(),
             target_bin: "/bin/ghostty".into(), args: vec![],
         }]).unwrap();
@@ -385,7 +385,7 @@ mod tests {
     #[test]
     fn fs_resolver_from_yaml() {
         let dir = TempDir::new().unwrap();
-        let yaml = serde_yaml::to_string(&vec![WrapperEntry {
+        let yaml = serde_yaml_ng::to_string(&vec![WrapperEntry {
             binary_name: "ghostty-akeyless".into(),
             workspace: "akeyless".into(),
             target_bin: "/bin/ghostty".into(),
