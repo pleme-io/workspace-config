@@ -1750,13 +1750,13 @@ rec {
         ];
 
       };
-      "serde_yaml" = rec {
-        crateName = "serde_yaml";
-        version = "0.9.34+deprecated";
+      "serde_yaml_ng" = rec {
+        crateName = "serde_yaml_ng";
+        version = "0.10.0";
         edition = "2021";
-        sha256 = "0isba1fjyg3l6rxk156k600ilzr8fp7crv82rhal0rxz5qd1m2va";
+        sha256 = "07ylpzx9xykdj4fqfa0vb6xz4c1pazrqqibv78hd8dlbp4kvckbv";
         authors = [
-          "David Tolnay <dtolnay@gmail.com>"
+          "Antoine Catton <devel@antoine.catton.fr>"
         ];
         dependencies = [
           {
@@ -2886,8 +2886,8 @@ rec {
             packageId = "serde_path_to_error";
           }
           {
-            name = "serde_yaml";
-            packageId = "serde_yaml";
+            name = "serde_yaml_ng";
+            packageId = "serde_yaml_ng";
           }
           {
             name = "thiserror";
